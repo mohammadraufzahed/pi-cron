@@ -138,7 +138,25 @@ def next_run(spec: str, after: int | None = None) -> int | None:
 # ---------- firing ----------
 
 
-def post_telegram(env: dict, text: str) -> None:
+def deliver(env: dict, soul: str, text: str) -> None:
+    """Post the run result — prefer the team mailbox (host delivers as
+    the soul and journals it); fall back to direct Bot API."""
+    team_dir = env.get("PI_TEAM_DIR")
+    if team_dir:
+        try:
+            req_dir = Path(team_dir) / "requests"
+            req_dir.mkdir(parents=True, exist_ok=True)
+            rid = uuid.uuid4().hex
+            (req_dir / f"{rid}.json").write_text(json.dumps({
+                "id": rid, "from": soul, "to": "host", "kind": "say",
+                "text": text[:4000],
+                "chat": env.get("PI_TEAM_CHAT") or env.get("TG_CHAT"),
+                "thread": env.get("PI_TEAM_THREAD"),
+                "at": int(time.time() * 1000),
+            }))
+            return
+        except Exception as e:
+            log("mailbox write failed, direct post:", e)
     tok, chat = env.get("TG_BOT_TOKEN"), env.get("TG_CHAT")
     if not tok or not chat:
         return
@@ -202,7 +220,7 @@ def fire(job: dict, path: Path) -> None:
     job["runs"] = int(job.get("runs") or 0) + 1
     job["last_run"] = int(time.time())
     if not job.get("silent") and out and out.lower() not in ("none", "-"):
-        post_telegram(job.get("env") or {}, out)
+        deliver(job.get("env") or {}, job.get("soul", ""), out)
 
     if job["spec"].startswith("once:"):
         path.unlink(missing_ok=True)
