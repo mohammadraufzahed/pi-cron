@@ -163,7 +163,7 @@ async function postTelegram(env, text) {
 
 function runPi(job) {
 	return new Promise((resolve) => {
-		const args = ["-p", job.prompt, "--mode", "print"];
+		const args = ["-p", job.prompt];
 		const proc = spawn("pi", args, {
 			cwd: job.cwd || homedir(),
 			env: { ...process.env, ...(job.env || {}) },
