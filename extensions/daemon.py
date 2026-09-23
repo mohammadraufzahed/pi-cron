@@ -113,6 +113,9 @@ def next_run(spec: str, after: int | None = None) -> int | None:
     now = after or int(time.time())
     kind, _, arg = spec.partition(":")
     if kind == "every":
+        if arg.endswith("s"):
+            s = int(arg[:-1] or 0)
+            return now + s if s > 0 else None
         m = int(arg or 0)
         return now + m * 60 if m > 0 else None
     if kind == "daily":

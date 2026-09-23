@@ -89,7 +89,7 @@ function ensureDaemon() {
 }
 
 const SPEC_RE =
-	/^(every:\d+|in:\d+|daily:\d{1,2}:\d{2}|once:\d+|cron:.+)$/;
+	/^(every:\d+s?|in:\d+s?|daily:\d{1,2}:\d{2}|once:\d+|cron:.+)$/;
 
 interface Job {
 	id: string;
@@ -176,13 +176,17 @@ export default function piCron(pi: ExtensionAPI) {
 				};
 			}
 			ensureDaemon();
+			const inArg = spec.slice(3);
+			const inSecs = inArg.endsWith("s")
+				? parseInt(inArg)
+				: parseInt(inArg) * 60;
 			const job: Job = {
 				id: randomUUID(),
 				soul: params.soul ?? process.env.PI_TEAM_FROM ?? "unknown",
 				env: envSnapshot(),
 				cwd: process.cwd(),
 				spec: spec.startsWith("in:")
-					? `once:${Math.floor(Date.now() / 1000) + parseInt(spec.slice(3)) * 60}`
+					? `once:${Math.floor(Date.now() / 1000) + inSecs}`
 					: spec,
 				prompt: params.prompt,
 				chat: process.env.PI_TEAM_CHAT,
@@ -191,7 +195,7 @@ export default function piCron(pi: ExtensionAPI) {
 					: undefined,
 				silent: params.silent,
 				next_run: spec.startsWith("in:")
-					? Math.floor(Date.now() / 1000) + parseInt(spec.slice(3)) * 60
+					? Math.floor(Date.now() / 1000) + inSecs
 					: 0, // host computes on first scan
 				created: Math.floor(Date.now() / 1000),
 			};
