@@ -1,7 +1,7 @@
 {
   "name": "pi-cron",
-  "version": "2.0.0",
-  "description": "Pi coding agent extension: self-scheduling \u2014 agents create recurring/one-shot jobs the host runs later.",
+  "version": "3.0.0",
+  "description": "Pi extension: self-contained job scheduler \u2014 cron/every/daily/in/once specs, own daemon, fires pi runs, posts via Telegram Bot API.",
   "keywords": [
     "pi-package",
     "cron",

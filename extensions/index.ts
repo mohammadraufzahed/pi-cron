@@ -26,15 +26,67 @@ import {
 	writeFileSync,
 	unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { Type } from "typebox";
 
 const DIR =
 	process.env.PI_CRON_DIR ??
-	join(homedir(), ".local/state/telegram-agent/cron");
+	join(homedir(), ".local/state/pi-cron");
 const JOBS = join(DIR, "jobs");
+const DAEMON = join(dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
+
+/** Env worth snapshotting into the job — identity + delivery + cwd. */
+const ENV_KEYS = [
+	"PI_TEAM_DIR", "PI_TEAM_FROM", "PI_TEAM_CHAT", "PI_TEAM_THREAD",
+	"PI_TEAM_MSG", "TG_BOT_TOKEN", "TG_CHAT", "TG_THREAD",
+	"GH_TOKEN", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+	"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "SOULS_DIR",
+	"PI_CRON_DIR", "PI_MODEL", "PI_MODEL_CHAT", "OPENROUTER_API_KEY",
+];
+
+function envSnapshot(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const k of ENV_KEYS) {
+		const v = process.env[k];
+		if (v) env[k] = v;
+	}
+	return env;
+}
+
+/** Ensure the scheduler is running: prefer the systemd user unit
+ *  (`make install`), fall back to a detached spawn. */
+function ensureDaemon() {
+	const pidfile = join(DIR, "daemon.pid");
+	try {
+		const pid = parseInt(readFileSync(pidfile, "utf-8"));
+		process.kill(pid, 0);
+		return; // alive
+	} catch {
+		/* stale/missing */
+	}
+	try {
+		const r = spawn(
+			"systemctl",
+			["--user", "start", "pi-cron.service"],
+			{ stdio: "ignore" },
+		);
+		r.unref();
+		return;
+	} catch {
+		/* no systemd — detached fallback */
+	}
+	mkdirSync(DIR, { recursive: true });
+	const child = spawn(process.execPath, [DAEMON], {
+		detached: true,
+		stdio: "ignore",
+		env: { ...process.env, PI_CRON_DIR: DIR },
+	});
+	child.unref();
+}
 
 const SPEC_RE =
 	/^(every:\d+|in:\d+|daily:\d{1,2}:\d{2}|once:\d+|cron:.+)$/;
@@ -123,9 +175,12 @@ export default function piCron(pi: ExtensionAPI) {
 					],
 				};
 			}
+			ensureDaemon();
 			const job: Job = {
 				id: randomUUID(),
 				soul: params.soul ?? process.env.PI_TEAM_FROM ?? "unknown",
+				env: envSnapshot(),
+				cwd: process.cwd(),
 				spec: spec.startsWith("in:")
 					? `once:${Math.floor(Date.now() / 1000) + parseInt(spec.slice(3)) * 60}`
 					: spec,
