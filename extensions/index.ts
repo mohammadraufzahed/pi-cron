@@ -226,6 +226,16 @@ export default function piCron(pi: ExtensionAPI) {
 				};
 			}
 			ensureDaemon();
+			// project binding — resolve its dir/repo now via the mailbox
+			let jobEnv = envSnapshot();
+			let jobCwd = process.cwd();
+			if (params.project) {
+				const proj = await projectUse(params.project);
+				if (proj?.dir) {
+					jobCwd = proj.dir;
+					if (proj.repo) jobEnv.GH_REPO = proj.repo;
+				}
+			}
 			const inArg = spec.slice(3);
 			const inSecs = inArg.endsWith("s")
 				? parseInt(inArg)
