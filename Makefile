@@ -6,8 +6,8 @@
 #   make logs      — tail the daemon log
 
 PREFIX      ?= $(HOME)/.local
-NODE        ?= $(shell command -v node)
-DAEMON      := $(abspath extensions/daemon.mjs)
+PYTHON      ?= $(shell command -v python3)
+DAEMON      := $(abspath extensions/daemon.py)
 UNIT_DIR    := $(HOME)/.config/systemd/user
 UNIT        := $(UNIT_DIR)/pi-cron.service
 CRON_DIR    ?= $(HOME)/.local/state/pi-cron
@@ -15,7 +15,7 @@ CRON_DIR    ?= $(HOME)/.local/state/pi-cron
 .PHONY: install uninstall status logs
 
 install:
-	@test -n "$(NODE)" || { echo "node not found — install Node.js >= 18"; exit 1; }
+	@test -n "$(PYTHON)" || { echo "python3 not found"; exit 1; }
 	@mkdir -p $(UNIT_DIR) $(CRON_DIR)/jobs
 	@printf '%s\n' \
 	  "[Unit]" \
@@ -26,7 +26,7 @@ install:
 	  "Type=simple" \
 	  "Environment=PI_CRON_DIR=$(CRON_DIR)" \
 	  "Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin" \
-	  "ExecStart=$(NODE) $(DAEMON)" \
+	  "ExecStart=$(PYTHON) $(DAEMON)" \
 	  "Restart=always" \
 	  "RestartSec=10" \
 	  "" \

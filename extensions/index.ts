@@ -37,7 +37,7 @@ const DIR =
 	process.env.PI_CRON_DIR ??
 	join(homedir(), ".local/state/pi-cron");
 const JOBS = join(DIR, "jobs");
-const DAEMON = join(dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
+const DAEMON = join(dirname(fileURLToPath(import.meta.url)), "daemon.py");
 
 /** Env worth snapshotting into the job — identity + delivery + cwd. */
 const ENV_KEYS = [
@@ -80,7 +80,7 @@ function ensureDaemon() {
 		/* no systemd — detached fallback */
 	}
 	mkdirSync(DIR, { recursive: true });
-	const child = spawn(process.execPath, [DAEMON], {
+	const child = spawn("python3", [DAEMON], {
 		detached: true,
 		stdio: "ignore",
 		env: { ...process.env, PI_CRON_DIR: DIR },
