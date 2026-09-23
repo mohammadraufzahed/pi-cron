@@ -99,6 +99,7 @@ interface Job {
 	chat?: string;
 	thread?: number;
 	silent?: boolean;
+	project?: string;
 	next_run: number;
 	last_run?: number;
 	runs?: number;
@@ -145,6 +146,45 @@ function describe(job: Job): string {
 	].join("\n");
 }
 
+async function projectUse(
+	name: string,
+): Promise<{ dir?: string; repo?: string } | null> {
+	const teamDir = process.env.PI_TEAM_DIR;
+	if (!teamDir) return null;
+	try {
+		const reqDir = join(teamDir, "requests");
+		const repDir = join(teamDir, "replies");
+		mkdirSync(reqDir, { recursive: true });
+		mkdirSync(repDir, { recursive: true });
+		const id = randomUUID();
+		writeFileSync(
+			join(reqDir, `${id}.json`),
+			JSON.stringify({
+				id,
+				from: process.env.PI_TEAM_FROM ?? "?",
+				to: "host",
+				kind: "project",
+				text: `use|||${name}`,
+				at: Date.now(),
+			}),
+		);
+		const file = join(repDir, `${id}.json`);
+		const deadline = Date.now() + 15_000;
+		while (Date.now() < deadline) {
+			if (existsSync(file)) {
+				const r = JSON.parse(readFileSync(file, "utf-8"));
+				const dir = String(r.text ?? "").match(/dir=(\S+)/)?.[1];
+				const repo = String(r.text ?? "").match(/repo=(\S+)/)?.[1];
+				return { dir, repo: repo === "—" ? undefined : repo };
+			}
+			await new Promise((r) => setTimeout(r, 400));
+		}
+	} catch {
+		/* no host — skip */
+	}
+	return null;
+}
+
 export default function piCron(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "cron_add",
@@ -159,6 +199,12 @@ export default function piCron(pi: ExtensionAPI) {
 			prompt: Type.String({ description: "What to do when it fires" }),
 			soul: Type.Optional(
 				Type.String({ description: "Which soul runs it (default: you)" }),
+			),
+			project: Type.Optional(
+				Type.String({
+					description:
+						"Bind the job to a project — its dir becomes cwd, its repo GH_REPO",
+				}),
 			),
 			silent: Type.Optional(
 				Type.Boolean({ description: "Run without posting the result" }),
@@ -187,8 +233,8 @@ export default function piCron(pi: ExtensionAPI) {
 			const job: Job = {
 				id: randomUUID(),
 				soul: params.soul ?? process.env.PI_TEAM_FROM ?? "unknown",
-				env: envSnapshot(),
-				cwd: process.cwd(),
+				env: jobEnv,
+				cwd: jobCwd,
 				spec: spec.startsWith("in:")
 					? `once:${Math.floor(Date.now() / 1000) + inSecs}`
 					: spec,
@@ -199,6 +245,7 @@ export default function piCron(pi: ExtensionAPI) {
 					: undefined,
 				silent: params.silent,
 				times: params.times,
+				project: params.project,
 				next_run: spec.startsWith("in:")
 					? Math.floor(Date.now() / 1000) + inSecs
 					: 0, // host computes on first scan
