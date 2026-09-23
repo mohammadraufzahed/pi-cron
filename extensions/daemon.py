@@ -152,17 +152,38 @@ def post_telegram(env: dict, text: str) -> None:
         log("telegram post failed:", e)
 
 
+def _final_text(stdout: str) -> str:
+    """Last assistant text from pi's --mode json event stream."""
+    text = ""
+    for line in stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        msg = ev.get("message") or {}
+        if (ev.get("type") == "message_end"
+                and msg.get("role") == "assistant"):
+            parts = [p.get("text", "") for p in msg.get("content", [])
+                     if isinstance(p, dict) and p.get("type") == "text"]
+            if parts:
+                text = "".join(parts)
+    return text
+
+
 def fire(job: dict, path: Path) -> None:
     log("firing", job["id"], job["spec"], f"soul={job.get('soul')}")
     env = {**os.environ, **(job.get("env") or {})}
+    args = ["pi", "-p", job["prompt"], "--mode", "json", "--no-session"]
+    if job.get("tools"):
+        args += ["--tools", job["tools"]]
     try:
         r = subprocess.run(
-            ["pi", "-p", job["prompt"]],
+            args,
             cwd=job.get("cwd") or str(Path.home()),
             env=env, capture_output=True, text=True,
             timeout=RUN_TIMEOUT_S,
         )
-        out = (r.stdout or "").strip()
+        out = _final_text(r.stdout or "") or (r.stdout or "").strip()
         if r.returncode != 0:
             job["fails"] = int(job.get("fails") or 0) + 1
             log("job failed:", job["id"], "exit", r.returncode,
