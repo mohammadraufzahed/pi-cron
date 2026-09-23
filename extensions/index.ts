@@ -105,6 +105,7 @@ interface Job {
 	fails?: number;
 	paused?: boolean;
 	created: number;
+	times?: number;
 }
 
 function loadJobs(): Job[] {
@@ -151,7 +152,7 @@ export default function piCron(pi: ExtensionAPI) {
 		description:
 			"Schedule work: 'every:90' (repeat), 'in:30' (one-shot in 30m), " +
 			"'daily:09:30' (host-local), 'once:UNIX_TS', or 'cron:0 9 * * 1-5'. " +
-			"Set soul to schedule for a teammate, silent=true to run without posting.",
+			"Set soul to schedule for a teammate, silent=true to skip posting, times=N to cap repeats.",
 		promptSnippet: "Schedule a recurring or one-shot task",
 		parameters: Type.Object({
 			spec: Type.String({ description: "every:N | in:N | daily:HH:MM | once:TS | cron:EXPR" }),
@@ -161,6 +162,9 @@ export default function piCron(pi: ExtensionAPI) {
 			),
 			silent: Type.Optional(
 				Type.Boolean({ description: "Run without posting the result" }),
+			),
+			times: Type.Optional(
+				Type.Number({ description: "Run at most N times then auto-remove" }),
 			),
 		}),
 		async execute(_id, params) {
@@ -194,6 +198,7 @@ export default function piCron(pi: ExtensionAPI) {
 					? parseInt(process.env.PI_TEAM_THREAD)
 					: undefined,
 				silent: params.silent,
+				times: params.times,
 				next_run: spec.startsWith("in:")
 					? Math.floor(Date.now() / 1000) + inSecs
 					: 0, // host computes on first scan

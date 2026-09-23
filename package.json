@@ -1,6 +1,6 @@
 {
   "name": "pi-cron",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Pi extension: self-contained job scheduler \u2014 cron/every/daily/in/once specs, own daemon, fires pi runs, posts via Telegram Bot API.",
   "keywords": [
     "pi-package",

@@ -35,6 +35,21 @@ SCAN_S = 30
 RUN_TIMEOUT_S = 15 * 60
 
 running: set[str] = set()
+sem = threading.BoundedSemaphore(4)  # max concurrent pi runs
+
+
+def _atomic_write(path: Path, job: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(job))
+    tmp.replace(path)
+
+
+def _rotate_log() -> None:
+    try:
+        if LOG.exists() and LOG.stat().st_size > 512 * 1024:
+            LOG.write_bytes(LOG.read_bytes()[-256 * 1024:])
+    except OSError:
+        pass
 
 
 def log(*args):
@@ -222,15 +237,17 @@ def fire(job: dict, path: Path) -> None:
     if not job.get("silent") and out and out.lower() not in ("none", "-"):
         deliver(job.get("env") or {}, job.get("soul", ""), out)
 
-    if job["spec"].startswith("once:"):
+    times = int(job.get("times") or 0)
+    if job["spec"].startswith("once:") or (times and job["runs"] >= times):
         path.unlink(missing_ok=True)
+        log("job done:", job["id"], f"({job['runs']} runs)")
         return
     nxt = next_run(job["spec"])
     if nxt is None:
         path.unlink(missing_ok=True)
         return
     job["next_run"] = nxt
-    path.write_text(json.dumps(job))
+    _atomic_write(path, job)
 
 
 # ---------- loop ----------
@@ -265,6 +282,8 @@ def main() -> None:
 
     while True:
         try:
+            _rotate_log()
+            (DIR / "heartbeat").write_text(str(int(time.time())))
             now = int(time.time())
             for f in sorted(JOBS.glob("*.json")):
                 try:
@@ -278,15 +297,17 @@ def main() -> None:
                 nxt = int(job.get("next_run") or 0)
                 if nxt <= 0:
                     job["next_run"] = next_run(job["spec"]) or now + 3600
-                    f.write_text(json.dumps(job))
+                    _atomic_write(f, job)
                     continue
                 if nxt <= now:
                     if (now - nxt > CATCHUP_GRACE_S
                             and not job["spec"].startswith("once:")):
                         job["next_run"] = next_run(job["spec"], now) \
                             or now + 3600
-                        f.write_text(json.dumps(job))
+                        _atomic_write(f, job)
                         continue
+                    if not sem.acquire(blocking=False):
+                        continue  # at capacity — retry next scan
                     running.add(jid)
 
                     def _go(j=job, p=f, i=jid):
@@ -296,6 +317,7 @@ def main() -> None:
                             log("fire crashed:", i)
                         finally:
                             running.discard(i)
+                            sem.release()
 
                     threading.Thread(target=_go, daemon=True).start()
         except Exception:
