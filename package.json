@@ -1,12 +1,19 @@
 {
   "name": "pi-cron",
-  "version": "1.0.0",
-  "description": "Pi coding agent extension: self-scheduling — agents create recurring/one-shot jobs the host runs later.",
-  "keywords": ["pi-package", "cron", "scheduler", "pi-extension"],
+  "version": "2.0.0",
+  "description": "Pi coding agent extension: self-scheduling \u2014 agents create recurring/one-shot jobs the host runs later.",
+  "keywords": [
+    "pi-package",
+    "cron",
+    "scheduler",
+    "pi-extension"
+  ],
   "license": "MIT",
   "repository": "mohammadraufzahed/pi-cron",
   "pi": {
-    "extensions": ["./extensions/index.ts"]
+    "extensions": [
+      "./extensions/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

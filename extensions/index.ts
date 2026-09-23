@@ -1,35 +1,43 @@
 /**
- * pi-cron — self-scheduling for the pi coding agent.
+ * pi-cron — self-scheduling for pi agents (v2).
  *
- * Souls create their own recurring/one-shot jobs — the host process
- * runs them later as that soul:
+ * Souls schedule recurring/one-shot work for themselves or teammates.
+ * Jobs are JSON files in $PI_CRON_DIR/jobs/ (default
+ * ~/.local/state/telegram-agent/cron/jobs); the host's cron watcher
+ * fires due jobs AS their soul and posts the result via its bot.
  *
- *   cron_add     — schedule a job: every N minutes, daily HH:MM, or once
- *   cron_list    — your scheduled jobs
- *   cron_remove  — delete a job by id
+ * Specs:
+ *   every:MINUTES      — repeat every N minutes
+ *   in:MINUTES         — one-shot, N minutes from now
+ *   daily:HH:MM        — once a day at host-local HH:MM
+ *   once:UNIX_TS       — one-shot at a timestamp
+ *   cron:M H DOM MON DOW — classic 5-field cron (host-local)
  *
- * Store: $PI_CRON_DIR (default ~/.local/state/telegram-agent/cron)
- *   jobs/<id>.json — {id, soul, kind, spec, prompt, chat, thread,
- *                     next_run, created}
- * The host watcher fires due jobs and updates next_run.
- *
- * Schedule formats (kind=spec):
- *   "every:90"      — every 90 minutes
- *   "daily:09:30"   — once a day at 09:30 (host-local time)
- *   "once:1696089600" — unix timestamp, fires once then deleted
+ * Job fields: id, soul, spec, prompt, chat, thread, silent,
+ *             next_run, last_run, runs, fails, paused, created
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	writeFileSync,
+	unlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 
-const CRON_DIR =
+const DIR =
 	process.env.PI_CRON_DIR ??
 	join(homedir(), ".local/state/telegram-agent/cron");
-const JOBS = join(CRON_DIR, "jobs");
+const JOBS = join(DIR, "jobs");
+
+const SPEC_RE =
+	/^(every:\d+|in:\d+|daily:\d{1,2}:\d{2}|once:\d+|cron:.+)$/;
 
 interface Job {
 	id: string;
@@ -37,87 +45,107 @@ interface Job {
 	spec: string;
 	prompt: string;
 	chat?: string;
-	thread?: string;
-	next_run: number; // unix seconds
+	thread?: number;
+	silent?: boolean;
+	next_run: number;
+	last_run?: number;
+	runs?: number;
+	fails?: number;
+	paused?: boolean;
 	created: number;
 }
 
-function nextRun(spec: string): number | null {
-	const now = Math.floor(Date.now() / 1000);
-	const [kind, arg] = spec.split(":", 2);
-	if (kind === "every") {
-		const mins = Number(arg);
-		return mins > 0 ? now + mins * 60 : null;
+function loadJobs(): Job[] {
+	if (!existsSync(JOBS)) return [];
+	const out: Job[] = [];
+	for (const f of readdirSync(JOBS)) {
+		if (!f.endsWith(".json")) continue;
+		try {
+			out.push(JSON.parse(readFileSync(join(JOBS, f), "utf-8")));
+		} catch {
+			/* corrupt — skip */
+		}
 	}
-	if (kind === "daily") {
-		const [h, m] = arg.split(":").map(Number);
-		const d = new Date();
-		d.setHours(h, m, 0, 0);
-		if (d.getTime() / 1000 <= now) d.setDate(d.getDate() + 1);
-		return Math.floor(d.getTime() / 1000);
-	}
-	if (kind === "once") return Number(arg) > now ? Number(arg) : null;
-	return null;
+	return out;
 }
 
-function list(): Job[] {
+function saveJob(job: Job) {
 	mkdirSync(JOBS, { recursive: true });
-	return readdirSync(JOBS)
-		.filter((f) => f.endsWith(".json"))
-		.map((f) => {
-			try {
-				return JSON.parse(readFileSync(join(JOBS, f), "utf-8")) as Job;
-			} catch {
-				return null;
-			}
-		})
-		.filter(Boolean) as Job[];
+	writeFileSync(join(JOBS, `${job.id}.json`), JSON.stringify(job, null, 2));
+}
+
+function fmtTs(ts: number): string {
+	return new Date(ts * 1000).toLocaleString("en-GB", { hour12: false });
+}
+
+function describe(job: Job): string {
+	const flags = [
+		job.paused ? "paused" : null,
+		job.silent ? "silent" : null,
+	].filter(Boolean);
+	return [
+		`${job.id} — ${job.spec}${flags.length ? ` [${flags.join(",")}]` : ""}`,
+		`  soul=${job.soul} next=${fmtTs(job.next_run)}`,
+		`  runs=${job.runs ?? 0} fails=${job.fails ?? 0}` +
+			(job.last_run ? ` last=${fmtTs(job.last_run)}` : ""),
+		`  prompt: ${job.prompt.slice(0, 100)}`,
+	].join("\n");
 }
 
 export default function piCron(pi: ExtensionAPI) {
-	const me = () => process.env.PI_TEAM_FROM ?? "agent";
-
 	pi.registerTool({
 		name: "cron_add",
 		label: "Cron Add",
 		description:
-			"Schedule a job that runs later AS YOU (same persona/tools). Specs: 'every:90' (minutes), 'daily:09:30', 'once:<unix-ts>'.",
-		promptSnippet: "Schedule a recurring or one-shot job",
-		promptGuidelines: [
-			"Use cron_add for 'check X every morning' / 'remind me' — the host runs it as you later.",
-		],
+			"Schedule work: 'every:90' (repeat), 'in:30' (one-shot in 30m), " +
+			"'daily:09:30' (host-local), 'once:UNIX_TS', or 'cron:0 9 * * 1-5'. " +
+			"Set soul to schedule for a teammate, silent=true to run without posting.",
+		promptSnippet: "Schedule a recurring or one-shot task",
 		parameters: Type.Object({
-			spec: Type.String({ description: "every:MIN | daily:HH:MM | once:TS" }),
+			spec: Type.String({ description: "every:N | in:N | daily:HH:MM | once:TS | cron:EXPR" }),
 			prompt: Type.String({ description: "What to do when it fires" }),
+			soul: Type.Optional(
+				Type.String({ description: "Which soul runs it (default: you)" }),
+			),
+			silent: Type.Optional(
+				Type.Boolean({ description: "Run without posting the result" }),
+			),
 		}),
 		async execute(_id, params) {
-			const nr = nextRun(params.spec);
-			if (nr === null)
+			const spec = params.spec.trim();
+			if (!SPEC_RE.test(spec)) {
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `bad spec '${params.spec}' — use every:MIN | daily:HH:MM | once:UNIX_TS`,
+							text: `bad spec '${spec}' — use every:N | in:N | daily:HH:MM | once:TS | cron:EXPR`,
 						},
 					],
 				};
-			mkdirSync(JOBS, { recursive: true });
+			}
 			const job: Job = {
-				id: randomUUID().slice(0, 8),
-				soul: me(),
-				spec: params.spec,
+				id: randomUUID(),
+				soul: params.soul ?? process.env.PI_TEAM_FROM ?? "unknown",
+				spec: spec.startsWith("in:")
+					? `once:${Math.floor(Date.now() / 1000) + parseInt(spec.slice(3)) * 60}`
+					: spec,
 				prompt: params.prompt,
 				chat: process.env.PI_TEAM_CHAT,
-				thread: process.env.PI_TEAM_THREAD,
-				next_run: nr,
+				thread: process.env.PI_TEAM_THREAD
+					? parseInt(process.env.PI_TEAM_THREAD)
+					: undefined,
+				silent: params.silent,
+				next_run: spec.startsWith("in:")
+					? Math.floor(Date.now() / 1000) + parseInt(spec.slice(3)) * 60
+					: 0, // host computes on first scan
 				created: Math.floor(Date.now() / 1000),
 			};
-			writeFileSync(join(JOBS, `${job.id}.json`), JSON.stringify(job));
+			saveJob(job);
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `scheduled ${job.id} (${params.spec}) — next run ${new Date(nr * 1000).toISOString()}`,
+						text: `scheduled ${job.id.slice(0, 8)} — ${job.spec} (soul=${job.soul}${job.silent ? ", silent" : ""})`,
 					},
 				],
 			};
@@ -127,25 +155,80 @@ export default function piCron(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "cron_list",
 		label: "Cron List",
-		description: "List YOUR scheduled jobs (and the whole team's).",
-		parameters: Type.Object({}),
-		async execute() {
-			const jobs = list();
-			if (!jobs.length)
+		description: "List scheduled jobs — yours or everyone's.",
+		promptSnippet: "List scheduled jobs",
+		parameters: Type.Object({
+			all: Type.Optional(Type.Boolean({ description: "All souls' jobs" })),
+		}),
+		async execute(_id, params) {
+			const me = process.env.PI_TEAM_FROM ?? "";
+			const jobs = loadJobs().filter(
+				(j) => params.all || !me || j.soul === me,
+			);
+			const text = jobs.length
+				? jobs.map(describe).join("\n\n")
+				: "(no jobs)";
+			return { content: [{ type: "text" as const, text }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "cron_pause",
+		label: "Cron Pause/Resume",
+		description: "Pause or resume a scheduled job without deleting it.",
+		parameters: Type.Object({
+			id: Type.String({ description: "job id (or prefix)" }),
+			paused: Type.Optional(Type.Boolean({ description: "default true" })),
+		}),
+		async execute(_id, params) {
+			const job = loadJobs().find((j) => j.id.startsWith(params.id));
+			if (!job)
 				return {
-					content: [{ type: "text" as const, text: "(no jobs)" }],
+					content: [{ type: "text" as const, text: `no job matching ${params.id}` }],
 				};
+			job.paused = params.paused ?? true;
+			saveJob(job);
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: jobs
-							.map(
-								(j) =>
-									`${j.id} [${j.soul}] ${j.spec} next=${new Date(j.next_run * 1000).toISOString()} — ${j.prompt.slice(0, 80)}`,
-							)
-							.join("\n"),
+						text: `${job.id.slice(0, 8)} ${job.paused ? "paused" : "resumed"}`,
 					},
+				],
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "cron_edit",
+		label: "Cron Edit",
+		description: "Change a job's spec or prompt.",
+		parameters: Type.Object({
+			id: Type.String({ description: "job id (or prefix)" }),
+			spec: Type.Optional(Type.String()),
+			prompt: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params) {
+			const job = loadJobs().find((j) => j.id.startsWith(params.id));
+			if (!job)
+				return {
+					content: [{ type: "text" as const, text: `no job matching ${params.id}` }],
+				};
+			if (params.spec) {
+				if (!SPEC_RE.test(params.spec))
+					return {
+						content: [
+							{ type: "text" as const, text: `bad spec '${params.spec}'` },
+						],
+					};
+				job.spec = params.spec;
+				job.next_run = 0; // host recomputes
+			}
+			if (params.prompt) job.prompt = params.prompt;
+			saveJob(job);
+			return {
+				content: [
+					{ type: "text" as const, text: `${job.id.slice(0, 8)} updated` },
 				],
 			};
 		},
@@ -154,17 +237,21 @@ export default function piCron(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "cron_remove",
 		label: "Cron Remove",
-		description: "Delete a scheduled job by id.",
-		parameters: Type.Object({ id: Type.String() }),
+		description: "Delete a scheduled job.",
+		parameters: Type.Object({
+			id: Type.String({ description: "job id (or prefix)" }),
+		}),
 		async execute(_id, params) {
-			const f = join(JOBS, `${params.id}.json`);
-			if (!existsSync(f))
+			const job = loadJobs().find((j) => j.id.startsWith(params.id));
+			if (!job)
 				return {
-					content: [{ type: "text" as const, text: "no such job" }],
+					content: [{ type: "text" as const, text: `no job matching ${params.id}` }],
 				};
-			unlinkSync(f);
+			unlinkSync(join(JOBS, `${job.id}.json`));
 			return {
-				content: [{ type: "text" as const, text: `removed ${params.id}` }],
+				content: [
+					{ type: "text" as const, text: `removed ${job.id.slice(0, 8)}` },
+				],
 			};
 		},
 	});
