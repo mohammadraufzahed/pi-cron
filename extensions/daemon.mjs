@@ -163,17 +163,27 @@ async function postTelegram(env, text) {
 
 function runPi(job) {
 	return new Promise((resolve) => {
-		const args = ["-p", job.prompt];
-		const proc = spawn("pi", args, {
+		const proc = spawn("pi", ["-p", job.prompt], {
 			cwd: job.cwd || homedir(),
 			env: { ...process.env, ...(job.env || {}) },
-			timeout: RUN_TIMEOUT_MS,
 		});
 		let out = "";
+		let done = false;
+		const finish = (code, err) => {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			resolve({ code, out: out.trim(), err });
+		};
+		// spawn has no timeout option — enforce it ourselves
+		const timer = setTimeout(() => {
+			try { proc.kill("SIGKILL"); } catch {}
+			finish(-2, "timeout");
+		}, RUN_TIMEOUT_MS);
 		proc.stdout.on("data", (d) => (out += d));
 		proc.stderr.on("data", (d) => log("pi stderr:", String(d).slice(0, 300)));
-		proc.on("close", (code) => resolve({ code, out: out.trim() }));
-		proc.on("error", (e) => resolve({ code: -1, out: "", err: e.message }));
+		proc.on("close", (code) => finish(code));
+		proc.on("error", (e) => finish(-1, e.message));
 	});
 }
 
