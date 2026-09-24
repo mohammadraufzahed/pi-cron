@@ -99,6 +99,7 @@ interface Job {
 	chat?: string;
 	thread?: number;
 	silent?: boolean;
+	tools?: string;
 	report?: string;         // always|on-failure|every:N|never
 	project?: string;
 	next_run: number;
@@ -147,9 +148,16 @@ function describe(job: Job): string {
 	].join("\n");
 }
 
+const WRITE_TOOLS = new Set([
+	"edit", "write", "bash", "gh_issue_create", "gh_issue_comment",
+	"gh_issue_close", "gh_pr_create", "gh_pr_comment", "gh_pr_merge",
+	"gh_pr_review", "gh_comment_reply", "deps_update", "docker_exec",
+	"project_register", "project_forget", "project_mode",
+]);
+
 async function projectUse(
 	name: string,
-): Promise<{ dir?: string; repo?: string } | null> {
+): Promise<{ dir?: string; repo?: string; mode?: string } | null> {
 	const teamDir = process.env.PI_TEAM_DIR;
 	if (!teamDir) return null;
 	try {
@@ -176,7 +184,8 @@ async function projectUse(
 				const r = JSON.parse(readFileSync(file, "utf-8"));
 				const dir = String(r.text ?? "").match(/dir=(\S+)/)?.[1];
 				const repo = String(r.text ?? "").match(/repo=(\S+)/)?.[1];
-				return { dir, repo: repo === "—" ? undefined : repo };
+				const mode = String(r.text ?? "").match(/mode=(\S+)/)?.[1];
+				return { dir, repo: repo === "—" ? undefined : repo, mode };
 			}
 			await new Promise((r) => setTimeout(r, 400));
 		}
@@ -230,11 +239,27 @@ export default function piCron(pi: ExtensionAPI) {
 			// project binding — resolve its dir/repo now via the mailbox
 			let jobEnv = envSnapshot();
 			let jobCwd = process.cwd();
+			let jobTools: string | undefined;
 			if (params.project) {
 				const proj = await projectUse(params.project);
 				if (proj?.dir) {
 					jobCwd = proj.dir;
 					if (proj.repo) jobEnv.GH_REPO = proj.repo;
+				}
+				// lifecycle gate — a readonly/monitor/paused project strips
+				// write tools from the job's allowlist
+				if (proj?.mode && proj.mode !== "develop") {
+					const strip = new Set(WRITE_TOOLS);
+					if (proj.mode === "monitor")
+						["deps_outdated", "git_diff"].forEach((t) => strip.add(t));
+					if (proj.mode === "paused")
+						["web_search", "web_fetch"].forEach((t) => strip.add(t));
+					const allow = (process.env.PI_TOOLS ?? "")
+						.split(",")
+						.map((t) => t.trim())
+						.filter(Boolean)
+						.filter((t) => !strip.has(t));
+					if (allow.length) jobTools = allow.join(",");
 				}
 			}
 			const inArg = spec.slice(3);
@@ -260,6 +285,7 @@ export default function piCron(pi: ExtensionAPI) {
 					? parseInt(process.env.PI_TEAM_THREAD)
 					: undefined,
 				silent: params.silent,
+				tools: jobTools,
 				report: params.report,
 				times: params.times,
 				project: params.project,
