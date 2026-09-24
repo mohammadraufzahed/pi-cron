@@ -99,6 +99,7 @@ interface Job {
 	chat?: string;
 	thread?: number;
 	silent?: boolean;
+	report?: string;         // always|on-failure|every:N|never
 	project?: string;
 	next_run: number;
 	last_run?: number;
@@ -240,20 +241,26 @@ export default function piCron(pi: ExtensionAPI) {
 			const inSecs = inArg.endsWith("s")
 				? parseInt(inArg)
 				: parseInt(inArg) * 60;
+			let prompt = params.prompt;
+			const policy = params.report ?? (params.silent ? "on-failure" : "always");
+			if (params.silent || params.report) {
+				prompt += `\n\n[Execution policy — ${policy}: this is a SILENT background job. Post nothing to chat unless the policy says to: 'always' post your result, 'on-failure' post ONLY if something is wrong/threshold crossed, 'every:N' post on the Nth consecutive run (use job_state for the counter), 'never' post nothing (internal work only). Working silently is the job.]`;
+			}
 			const job: Job = {
 				id: randomUUID(),
 				soul: params.soul ?? process.env.PI_TEAM_FROM ?? "unknown",
-				env: jobEnv,
+				env: { ...jobEnv },
 				cwd: jobCwd,
 				spec: spec.startsWith("in:")
 					? `once:${Math.floor(Date.now() / 1000) + inSecs}`
 					: spec,
-				prompt: params.prompt,
+				prompt,
 				chat: process.env.PI_TEAM_CHAT,
 				thread: process.env.PI_TEAM_THREAD
 					? parseInt(process.env.PI_TEAM_THREAD)
 					: undefined,
 				silent: params.silent,
+				report: params.report,
 				times: params.times,
 				project: params.project,
 				next_run: spec.startsWith("in:")
@@ -261,6 +268,9 @@ export default function piCron(pi: ExtensionAPI) {
 					: 0, // host computes on first scan
 				created: Math.floor(Date.now() / 1000),
 			};
+			job.env.PI_JOB_ID = job.id;
+			if (job.silent) job.env.PI_SILENT = "1";
+			if (job.report) job.env.PI_REPORT = job.report;
 			saveJob(job);
 			return {
 				content: [
@@ -372,6 +382,44 @@ export default function piCron(pi: ExtensionAPI) {
 			return {
 				content: [
 					{ type: "text" as const, text: `removed ${job.id.slice(0, 8)}` },
+				],
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "job_state",
+		label: "Job State",
+		description:
+			"Persistent per-job memory — read/update a JSON blob that survives between this job's runs. Counters (every:N), last-seen, dedup hashes.",
+		parameters: Type.Object({
+			set: Type.Optional(
+				Type.Object({}, { additionalProperties: true }),
+			),
+		}),
+		async execute(_id, params) {
+			const jid = process.env.PI_JOB_ID ?? "adhoc";
+			const statesDir = join(DIR, "states");
+			mkdirSync(statesDir, { recursive: true });
+			const file = join(statesDir, `${jid}.json`);
+			let state: Record<string, unknown> = {};
+			if (existsSync(file)) {
+				try {
+					state = JSON.parse(readFileSync(file, "utf-8"));
+				} catch {
+					/* fresh */
+				}
+			}
+			if (params.set && Object.keys(params.set).length) {
+				state = { ...state, ...params.set };
+				writeFileSync(file, JSON.stringify(state));
+			}
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `job ${jid} state:\n${JSON.stringify(state, null, 2)}`,
+					},
 				],
 			};
 		},
