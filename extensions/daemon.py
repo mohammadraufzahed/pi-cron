@@ -213,6 +213,11 @@ def fire(job: dict, path: Path) -> None:
     args = ["pi", "-p", job["prompt"], "--mode", "json", "--no-session"]
     if job.get("tools"):
         args += ["--tools", job["tools"]]
+    # extension (monitoring/team tools) — job may pin one, else the
+    # default from env so cron runs get the same tools as chats
+    ext = job.get("extension") or os.environ.get("PI_EXTENSION", "")
+    if ext:
+        args += ["--extension", ext]
     try:
         r = subprocess.run(
             args,
