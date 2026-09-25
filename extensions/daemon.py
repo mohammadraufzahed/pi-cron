@@ -105,17 +105,26 @@ def _names(field: str, table: dict[str, int]) -> str:
 
 def _split_tz(arg: str) -> tuple[str, object | None]:
     """'<expr>@<IANA zone>' — daily:09:00@Asia/Tehran, cron:0 9 * * 1-5@UTC.
-    Returns (expr, tzinfo|None)."""
+    No @TZ → default zone (PI_CRON_TZ, or Asia/Tehran — user lives there).
+    Returns (expr, tzinfo)."""
+    import os
+    from zoneinfo import ZoneInfo
+
+    default = os.environ.get("PI_CRON_TZ", "Asia/Tehran")
     if "@" not in arg:
-        return arg, None
+        try:
+            return arg, ZoneInfo(default)
+        except Exception:
+            return arg, None
     expr, _, zone = arg.partition("@")
     try:
-        from zoneinfo import ZoneInfo
-
         return expr, ZoneInfo(zone)
     except Exception:
-        log("bad timezone in spec, using host local:", arg)
-        return expr, None
+        log("bad timezone in spec, using default:", arg)
+        try:
+            return expr, ZoneInfo(default)
+        except Exception:
+            return expr, None
 
 
 def cron_next(expr: str, after: int, tz=None) -> int | None:

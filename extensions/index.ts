@@ -9,7 +9,7 @@
  * Specs:
  *   every:MINUTES      — repeat every N minutes
  *   in:MINUTES         — one-shot, N minutes from now
- *   daily:HH:MM[@TZ]   — once a day at HH:MM (host-local, or IANA zone like Asia/Tehran)
+ *   daily:HH:MM[@TZ]   — once a day at HH:MM in TZ (default Asia/Tehran)
  *   once:UNIX_TS       — one-shot at a timestamp
  *   cron:M H DOM MON DOW — classic 5-field cron (host-local)
  *
