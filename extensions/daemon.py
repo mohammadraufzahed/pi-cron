@@ -103,14 +103,29 @@ def _names(field: str, table: dict[str, int]) -> str:
     return ",".join(out)
 
 
-def cron_next(expr: str, after: int) -> int | None:
+def _split_tz(arg: str) -> tuple[str, object | None]:
+    """'<expr>@<IANA zone>' — daily:09:00@Asia/Tehran, cron:0 9 * * 1-5@UTC.
+    Returns (expr, tzinfo|None)."""
+    if "@" not in arg:
+        return arg, None
+    expr, _, zone = arg.partition("@")
+    try:
+        from zoneinfo import ZoneInfo
+
+        return expr, ZoneInfo(zone)
+    except Exception:
+        log("bad timezone in spec, using host local:", arg)
+        return expr, None
+
+
+def cron_next(expr: str, after: int, tz=None) -> int | None:
     f = expr.split()
     if len(f) != 5:
         return None
     f[3] = _names(f[3], _MONTHS)
     f[4] = _names(f[4], _DOWS)
     dom_star, dow_star = f[2] == "*", f[4] == "*"
-    t = datetime.fromtimestamp(after).replace(second=0, microsecond=0)
+    t = datetime.fromtimestamp(after, tz=tz).replace(second=0, microsecond=0)
     t += timedelta(minutes=1)
     for _ in range(366 * 24 * 60):
         dom_ok = _field_ok(f[2], t.day)
@@ -134,11 +149,12 @@ def next_run(spec: str, after: int | None = None) -> int | None:
         m = int(arg or 0)
         return now + m * 60 if m > 0 else None
     if kind == "daily":
+        arg, tz = _split_tz(arg)
         try:
             h, m = (int(x) for x in arg.split(":"))
         except ValueError:
             return None
-        d = datetime.now().replace(hour=h, minute=m, second=0, microsecond=0)
+        d = datetime.now(tz=tz).replace(hour=h, minute=m, second=0, microsecond=0)
         if int(d.timestamp()) <= now:
             d += timedelta(days=1)
         return int(d.timestamp())
@@ -146,7 +162,8 @@ def next_run(spec: str, after: int | None = None) -> int | None:
         ts = int(arg or 0)
         return ts if ts > now - CATCHUP_GRACE_S else None
     if kind == "cron":
-        return cron_next(arg, now)
+        arg, tz = _split_tz(arg)
+        return cron_next(arg, now, tz)
     return None
 
 
@@ -226,19 +243,23 @@ def fire(job: dict, path: Path) -> None:
             timeout=RUN_TIMEOUT_S,
         )
         out = _final_text(r.stdout or "") or (r.stdout or "").strip()
+        job["last_status"] = "ok" if r.returncode == 0 else "failed"
         if r.returncode != 0:
             job["fails"] = int(job.get("fails") or 0) + 1
             log("job failed:", job["id"], "exit", r.returncode,
                 (r.stderr or "")[:200])
     except subprocess.TimeoutExpired:
         out, job["fails"] = "", int(job.get("fails") or 0) + 1
+        job["last_status"] = "timeout"
         log("job timed out:", job["id"])
     except Exception as e:
         out, job["fails"] = "", int(job.get("fails") or 0) + 1
+        job["last_status"] = "error"
         log("job error:", job["id"], e)
 
     job["runs"] = int(job.get("runs") or 0) + 1
     job["last_run"] = int(time.time())
+    job["last_answer"] = (out or "")[:200]
     if not job.get("silent") and out and out.lower() not in ("none", "-"):
         deliver(job.get("env") or {}, job.get("soul", ""), out)
 
