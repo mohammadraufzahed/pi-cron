@@ -227,6 +227,12 @@ def _final_text(stdout: str) -> str:
 def fire(job: dict, path: Path) -> None:
     log("firing", job["id"], job["spec"], f"soul={job.get('soul')}")
     env = {**os.environ, **(job.get("env") or {})}
+    # jobs snapshot GH_TOKEN at create-time — it expires within the
+    # hour. The gh shim re-mints fresh per call; drop the stale one.
+    env.pop("GH_TOKEN", None)
+    repo = env.get("PI_TEAM_REPO")
+    if repo:
+        env["PATH"] = f"{repo}/tools/bin:{env.get('PATH', '')}"
     args = ["pi", "-p", job["prompt"], "--mode", "json", "--no-session"]
     if job.get("tools"):
         args += ["--tools", job["tools"]]
