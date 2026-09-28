@@ -18,6 +18,7 @@ Self-contained job scheduler for pi agents — schedule work with plain specs, a
 - `cron_add(spec, prompt, soul?, silent?, times?)` — `times:N` = run at most N times then auto-remove
 - `cron_list(all?)` — jobs with next run, stats, flags
 - `cron_pause(id, paused?)` — pause/resume
+- `run_now(id)` — fire a job immediately as a manual run (recorded as `trigger: "manual"`); schedule/`next_run`/`times` untouched. Paused jobs must be resumed first.
 - `cron_edit(id, spec?, prompt?)`
 - `cron_remove(id)`
 

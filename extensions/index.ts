@@ -23,6 +23,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	renameSync,
 	writeFileSync,
 	unlinkSync,
 } from "node:fs";
@@ -111,6 +112,9 @@ interface Job {
 	paused?: boolean;
 	created: number;
 	times?: number;
+	fire_now?: boolean;    // run_now marker — daemon fires once, leaves spec alone
+	last_trigger?: string; // "scheduled" | "manual"
+	manual_runs?: number;
 	dedup_key?: string; // souls pass e.g. 'pr:owner/repo#N' — re-adding replaces the older job
 }
 
@@ -130,7 +134,12 @@ function loadJobs(): Job[] {
 
 function saveJob(job: Job) {
 	mkdirSync(JOBS, { recursive: true });
-	writeFileSync(join(JOBS, `${job.id}.json`), JSON.stringify(job, null, 2));
+	// atomic: the daemon unlinks any job file it can't parse — a torn
+	// write would lose the job, so go through tmp + rename like it does
+	const file = join(JOBS, `${job.id}.json`);
+	const tmp = join(JOBS, `${job.id}.tmp`);
+	writeFileSync(tmp, JSON.stringify(job, null, 2));
+	renameSync(tmp, file);
 }
 
 function fmtTs(ts: number): string {
@@ -145,8 +154,13 @@ function describe(job: Job): string {
 	return [
 		`${job.id} — ${job.spec}${flags.length ? ` [${flags.join(",")}]` : ""}`,
 		`  soul=${job.soul} next=${fmtTs(job.next_run)}`,
-		`  runs=${job.runs ?? 0} fails=${job.fails ?? 0}` +
-			(job.last_run ? ` last=${job.last_status || "ok"}@${fmtTs(job.last_run)}` : ""),
+		`  runs=${job.runs ?? 0}` +
+			(job.manual_runs ? ` manual=${job.manual_runs}` : "") +
+			` fails=${job.fails ?? 0}` +
+			(job.last_run
+				? ` last=${job.last_status || "ok"}@${fmtTs(job.last_run)}` +
+					(job.last_trigger === "manual" ? " (manual)" : "")
+				: ""),
 		`  prompt: ${job.prompt.slice(0, 100)}`,
 	].join("\n");
 }
@@ -379,6 +393,51 @@ export default function piCron(pi: ExtensionAPI) {
 					{
 						type: "text" as const,
 						text: `${job.id.slice(0, 8)} ${job.paused ? "paused" : "resumed"}`,
+					},
+				],
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "run_now",
+		label: "Run Now",
+		description:
+			"Fire a scheduled job immediately — same prompt/env/delivery as a " +
+			"normal fire, but marked as a manual run. The schedule is untouched: " +
+			"next_run, runs/times and dedup_key are unchanged. Paused jobs must " +
+			"be resumed first.",
+		promptSnippet: "Fire a scheduled job right now",
+		parameters: Type.Object({
+			id: Type.String({ description: "job id (or prefix)" }),
+		}),
+		async execute(_id, params) {
+			const job = loadJobs().find((j) => j.id.startsWith(params.id));
+			if (!job)
+				return {
+					content: [
+						{ type: "text" as const, text: `no job matching ${params.id}` },
+					],
+				};
+			if (job.paused)
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `${job.id.slice(0, 8)} is paused — resume it with cron_pause(id, false) first`,
+						},
+					],
+				};
+			ensureDaemon();
+			job.fire_now = true;
+			saveJob(job);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							`manual run queued for ${job.id.slice(0, 8)} — ` +
+							`fires on the daemon's next scan (≤30s); schedule unchanged`,
 					},
 				],
 			};
