@@ -44,6 +44,33 @@ def _atomic_write(path: Path, job: dict) -> None:
     tmp.replace(path)
 
 
+# keys fire() owns — merge-on-write touches only these, so edits made
+# while the run was in-flight (fire_now, paused, spec edits) survive.
+_FIRE_KEYS = frozenset({"last_status", "fails", "last_trigger",
+                       "manual_runs", "runs", "last_run", "last_answer"})
+
+
+def _commit(path: Path, job: dict, owned: frozenset) -> None:
+    """Write back only `owned` keys onto the CURRENT disk contents.
+    Manual runs pass _FIRE_KEYS (next_run isn't theirs to move);
+    scheduled runs add "next_run"."""
+    disk = None
+    try:
+        disk = json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    if not isinstance(disk, dict):
+        # file gone/corrupt mid-run — don't resurrect a deleted job
+        log("job file gone mid-run, skip write:", path.stem)
+        return
+    for k in owned:
+        if k in job:
+            disk[k] = job[k]
+        else:
+            disk.pop(k, None)
+    _atomic_write(path, disk)
+
+
 def _rotate_log() -> None:
     try:
         if LOG.exists() and LOG.stat().st_size > 512 * 1024:
@@ -286,8 +313,8 @@ def fire(job: dict, path: Path, manual: bool = False) -> None:
         deliver(job.get("env") or {}, job.get("soul", ""), out)
 
     if manual:
-        # Schedule untouched: keep next_run exactly as it was.
-        _atomic_write(path, job)
+        # Schedule untouched: next_run stays whatever is on disk now.
+        _commit(path, job, _FIRE_KEYS)
         return
 
     times = int(job.get("times") or 0)
@@ -300,7 +327,7 @@ def fire(job: dict, path: Path, manual: bool = False) -> None:
         path.unlink(missing_ok=True)
         return
     job["next_run"] = nxt
-    _atomic_write(path, job)
+    _commit(path, job, _FIRE_KEYS | {"next_run"})
 
 
 # ---------- loop ----------
