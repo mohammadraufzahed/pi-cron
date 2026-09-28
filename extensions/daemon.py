@@ -44,6 +44,33 @@ def _atomic_write(path: Path, job: dict) -> None:
     tmp.replace(path)
 
 
+# keys fire() owns — merge-on-write touches only these, so edits made
+# while the run was in-flight (fire_now, paused, spec edits) survive.
+_FIRE_KEYS = frozenset({"last_status", "fails", "last_trigger",
+                       "manual_runs", "runs", "last_run", "last_answer"})
+
+
+def _commit(path: Path, job: dict, owned: frozenset) -> None:
+    """Write back only `owned` keys onto the CURRENT disk contents.
+    Manual runs pass _FIRE_KEYS (next_run isn't theirs to move);
+    scheduled runs add "next_run"."""
+    disk = None
+    try:
+        disk = json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    if not isinstance(disk, dict):
+        # file gone/corrupt mid-run — don't resurrect a deleted job
+        log("job file gone mid-run, skip write:", path.stem)
+        return
+    for k in owned:
+        if k in job:
+            disk[k] = job[k]
+        else:
+            disk.pop(k, None)
+    _atomic_write(path, disk)
+
+
 def _rotate_log() -> None:
     try:
         if LOG.exists() and LOG.stat().st_size > 512 * 1024:
@@ -233,8 +260,9 @@ def _final_text(stdout: str) -> str:
     return text
 
 
-def fire(job: dict, path: Path) -> None:
-    log("firing", job["id"], job["spec"], f"soul={job.get('soul')}")
+def fire(job: dict, path: Path, manual: bool = False) -> None:
+    log("firing", job["id"], job["spec"],
+        f"soul={job.get('soul')} trigger={'manual' if manual else 'scheduled'}")
     env = {**os.environ, **(job.get("env") or {})}
     # jobs snapshot GH_TOKEN at create-time — it expires within the
     # hour. The gh shim re-mints fresh per call; drop the stale one.
@@ -272,11 +300,22 @@ def fire(job: dict, path: Path) -> None:
         job["last_status"] = "error"
         log("job error:", job["id"], e)
 
-    job["runs"] = int(job.get("runs") or 0) + 1
+    job["last_trigger"] = "manual" if manual else "scheduled"
+    if manual:
+        # A manual fire is an extra run on top of the schedule — it must
+        # not consume the `times` budget or remove a `once:` job early.
+        job["manual_runs"] = int(job.get("manual_runs") or 0) + 1
+    else:
+        job["runs"] = int(job.get("runs") or 0) + 1
     job["last_run"] = int(time.time())
     job["last_answer"] = (out or "")[:200]
     if not job.get("silent") and out and out.lower() not in ("none", "-"):
         deliver(job.get("env") or {}, job.get("soul", ""), out)
+
+    if manual:
+        # Schedule untouched: next_run stays whatever is on disk now.
+        _commit(path, job, _FIRE_KEYS)
+        return
 
     times = int(job.get("times") or 0)
     if job["spec"].startswith("once:") or (times and job["runs"] >= times):
@@ -288,7 +327,7 @@ def fire(job: dict, path: Path) -> None:
         path.unlink(missing_ok=True)
         return
     job["next_run"] = nxt
-    _atomic_write(path, job)
+    _commit(path, job, _FIRE_KEYS | {"next_run"})
 
 
 # ---------- loop ----------
@@ -335,13 +374,17 @@ def main() -> None:
                 jid = job.get("id", f.stem)
                 if jid in running or job.get("paused"):
                     continue
+                # run_now sets fire_now — fire immediately as a manual
+                # run without moving next_run. Marker stays on disk until
+                # a slot is free, so a full semaphore retries next scan.
+                manual = bool(job.get("fire_now"))
                 nxt = int(job.get("next_run") or 0)
-                if nxt <= 0:
+                if nxt <= 0 and not manual:
                     job["next_run"] = next_run(job["spec"]) or now + 3600
                     _atomic_write(f, job)
                     continue
-                if nxt <= now:
-                    if (now - nxt > CATCHUP_GRACE_S
+                if manual or nxt <= now:
+                    if (not manual and now - nxt > CATCHUP_GRACE_S
                             and not job["spec"].startswith("once:")):
                         job["next_run"] = next_run(job["spec"], now) \
                             or now + 3600
@@ -349,11 +392,16 @@ def main() -> None:
                         continue
                     if not sem.acquire(blocking=False):
                         continue  # at capacity — retry next scan
+                    if manual:
+                        # commit the marker pop BEFORE the run starts, so
+                        # a crashed manual run can't loop re-fires
+                        job.pop("fire_now", None)
+                        _atomic_write(f, job)
                     running.add(jid)
 
-                    def _go(j=job, p=f, i=jid):
+                    def _go(j=job, p=f, i=jid, m=manual):
                         try:
-                            fire(j, p)
+                            fire(j, p, m)
                         except Exception:
                             log("fire crashed:", i)
                         finally:
