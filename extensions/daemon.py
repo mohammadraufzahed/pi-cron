@@ -41,9 +41,6 @@ sem = threading.BoundedSemaphore(4)  # max concurrent pi runs
 
 
 def _atomic_write(path: Path, job: dict) -> None:
-    # Unique tmp name — a fixed .tmp collides when two writers race on
-    # the same job (scan thread vs fire-thread _commit, or two daemons
-    # before the pidfile lock) -> FileNotFoundError on tmp.replace.
     tmp = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(job))
     tmp.replace(path)
@@ -340,10 +337,6 @@ def fire(job: dict, path: Path, manual: bool = False) -> None:
 
 def main() -> None:
     JOBS.mkdir(parents=True, exist_ok=True)
-    # Single-instance guard: flock an open pidfile fd held for the
-    # process lifetime. The old exists()->read->pid_alive check was
-    # check-then-act, and index.ts's detached-spawn fallback could
-    # start a second writer on the same jobs dir.
     pid_fd = open(PIDFILE, "a+")
     try:
         fcntl.flock(pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -370,9 +363,6 @@ def main() -> None:
             (DIR / "heartbeat").write_text(str(int(time.time())))
             now = int(time.time())
             for f in sorted(JOBS.glob("*.json")):
-                # Per-file isolation: one malformed job must be logged
-                # and skipped, not abort the whole scan pass (glob is
-                # sorted, so a bad file starved every job after it).
                 try:
                     try:
                         job = json.loads(f.read_text())
@@ -383,9 +373,6 @@ def main() -> None:
                     jid = job.get("id", f.stem)
                     if jid in running or job.get("paused"):
                         continue
-                    # run_now sets fire_now - fire immediately as a manual
-                    # run without moving next_run. Marker stays on disk until
-                    # a slot is free, so a full semaphore retries next scan.
                     manual = bool(job.get("fire_now"))
                     nxt = int(job.get("next_run") or 0)
                     if nxt <= 0 and not manual:
@@ -400,10 +387,8 @@ def main() -> None:
                             _atomic_write(f, job)
                             continue
                         if not sem.acquire(blocking=False):
-                            continue  # at capacity - retry next scan
+                            continue
                         if manual:
-                            # commit the marker pop BEFORE the run starts, so
-                            # a crashed manual run can't loop re-fires
                             job.pop("fire_now", None)
                             _atomic_write(f, job)
                         running.add(jid)

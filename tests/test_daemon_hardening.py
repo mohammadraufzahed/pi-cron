@@ -33,7 +33,7 @@ def test_unique_tmp_concurrent():
             try:
                 for _ in range(30):
                     d._atomic_write(path, {"w": i})
-            except Exception as e:  # noqa: BLE001 - report any race
+            except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
         threads = [threading.Thread(target=writer, args=(i,))
@@ -44,7 +44,6 @@ def test_unique_tmp_concurrent():
             t.join()
         assert not errors, f"concurrent writes failed: {errors}"
         assert json.loads(path.read_text())["w"] in range(4)
-        # no tmp litter left behind
         assert list(Path(td).glob("*.tmp")) == []
     print("ok: _atomic_write unique tmp names, concurrent writers")
 
@@ -55,8 +54,6 @@ def test_flock_single_instance(tmpdir):
     holder = open(pidfile, "a+")
     fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    # patch module paths to the sandbox, then call main(): it must
-    # hit the flock guard and return without writing a pid or heartbeat
     d.DIR, d.JOBS = Path(tmpdir), Path(tmpdir) / "jobs"
     d.PIDFILE, d.LOG = pidfile, Path(tmpdir) / "daemon.log"
     d.main()
@@ -81,7 +78,6 @@ def test_per_file_isolation(tmpdir):
     d.DIR, d.JOBS = Path(tmpdir), jobs
     d.LOG = Path(tmpdir) / "daemon.log"
 
-    # mirror main()'s per-file body against the sandbox dir
     seen = []
     now = d.time.time()
     for f in sorted(d.JOBS.glob("*.json")):
