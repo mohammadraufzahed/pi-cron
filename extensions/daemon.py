@@ -13,6 +13,7 @@ Lockfile: <dir>/daemon.pid — one daemon per job dir.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -20,6 +21,7 @@ import threading
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 import uuid
 from datetime import datetime, timedelta
@@ -39,7 +41,7 @@ sem = threading.BoundedSemaphore(4)  # max concurrent pi runs
 
 
 def _atomic_write(path: Path, job: dict) -> None:
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(job))
     tmp.replace(path)
 
@@ -333,24 +335,19 @@ def fire(job: dict, path: Path, manual: bool = False) -> None:
 # ---------- loop ----------
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
 def main() -> None:
     JOBS.mkdir(parents=True, exist_ok=True)
-    if PIDFILE.exists():
-        try:
-            if _pid_alive(int(PIDFILE.read_text())):
-                log("already running — exit")
-                return
-        except (ValueError, OSError):
-            pass
-    PIDFILE.write_text(str(os.getpid()))
+    pid_fd = open(PIDFILE, "a+")
+    try:
+        fcntl.flock(pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another daemon holds the pid lock - exit")
+        pid_fd.close()
+        return
+    pid_fd.seek(0)
+    pid_fd.truncate()
+    pid_fd.write(str(os.getpid()))
+    pid_fd.flush()
     log("pi-cron daemon up, pid", os.getpid(), "dir", JOBS)
 
     def _bye(*_):
@@ -367,50 +364,51 @@ def main() -> None:
             now = int(time.time())
             for f in sorted(JOBS.glob("*.json")):
                 try:
-                    job = json.loads(f.read_text())
-                except (OSError, ValueError):
-                    f.unlink(missing_ok=True)
-                    continue
-                jid = job.get("id", f.stem)
-                if jid in running or job.get("paused"):
-                    continue
-                # run_now sets fire_now — fire immediately as a manual
-                # run without moving next_run. Marker stays on disk until
-                # a slot is free, so a full semaphore retries next scan.
-                manual = bool(job.get("fire_now"))
-                nxt = int(job.get("next_run") or 0)
-                if nxt <= 0 and not manual:
-                    job["next_run"] = next_run(job["spec"]) or now + 3600
-                    _atomic_write(f, job)
-                    continue
-                if manual or nxt <= now:
-                    if (not manual and now - nxt > CATCHUP_GRACE_S
-                            and not job["spec"].startswith("once:")):
-                        job["next_run"] = next_run(job["spec"], now) \
-                            or now + 3600
+                    try:
+                        job = json.loads(f.read_text())
+                    except (OSError, ValueError):
+                        log("unparseable job file, removing:", f.name)
+                        f.unlink(missing_ok=True)
+                        continue
+                    jid = job.get("id", f.stem)
+                    if jid in running or job.get("paused"):
+                        continue
+                    manual = bool(job.get("fire_now"))
+                    nxt = int(job.get("next_run") or 0)
+                    if nxt <= 0 and not manual:
+                        job["next_run"] = next_run(job["spec"]) or now + 3600
                         _atomic_write(f, job)
                         continue
-                    if not sem.acquire(blocking=False):
-                        continue  # at capacity — retry next scan
-                    if manual:
-                        # commit the marker pop BEFORE the run starts, so
-                        # a crashed manual run can't loop re-fires
-                        job.pop("fire_now", None)
-                        _atomic_write(f, job)
-                    running.add(jid)
+                    if manual or nxt <= now:
+                        if (not manual and now - nxt > CATCHUP_GRACE_S
+                                and not job["spec"].startswith("once:")):
+                            job["next_run"] = next_run(job["spec"], now) \
+                                or now + 3600
+                            _atomic_write(f, job)
+                            continue
+                        if not sem.acquire(blocking=False):
+                            continue
+                        if manual:
+                            job.pop("fire_now", None)
+                            _atomic_write(f, job)
+                        running.add(jid)
 
-                    def _go(j=job, p=f, i=jid, m=manual):
-                        try:
-                            fire(j, p, m)
-                        except Exception:
-                            log("fire crashed:", i)
-                        finally:
-                            running.discard(i)
-                            sem.release()
+                        def _go(j=job, p=f, i=jid, m=manual):
+                            try:
+                                fire(j, p, m)
+                            except Exception:
+                                log("fire crashed:", i, "\n",
+                                    traceback.format_exc())
+                            finally:
+                                running.discard(i)
+                                sem.release()
 
-                    threading.Thread(target=_go, daemon=True).start()
+                        threading.Thread(target=_go, daemon=True).start()
+                except Exception:
+                    log("bad job file, skipping:", f.name, "\n",
+                        traceback.format_exc())
         except Exception:
-            log("scan loop error")
+            log("scan loop error:", traceback.format_exc())
         time.sleep(SCAN_S)
 
 
